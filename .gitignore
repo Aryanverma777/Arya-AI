@@ -141,3 +141,11 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+blobs/
+blob/
+manifests/
+metadata/
+AI SIDE/
+*.onnx
+*.bin
