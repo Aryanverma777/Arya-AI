@@ -1,9 +1,12 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, use } from 'react';
 import SpeechRecognition from 'react-speech-recognition';
 import { puter } from '@heyputer/puter.js';
 import useSpeechRecognition from './useSpeechRecognition';
-import { streamChatResponse } from '../services/chatService';
+import { fetchSessions, sendMessage, streamChatResponse } from '../services/chatService';
+import { useChatSessionContext } from '../context/ChatSessionContext';
+import axios from 'axios';
+const BaseUrl = import.meta.env.PUBLIC_API_BASE_URL || 'http://localhost:3000';
 
 const SILENCE_TIMEOUT_MS = 2500;
 
@@ -15,7 +18,16 @@ export default function useVoiceAssistant() {
   const wakeword = (import.meta.env.PUBLIC_WAKEWORD || 'arya').toLowerCase();
   const [mode, setMode] = useState('waiting'); // waiting | listening | searching | speaking | resting
   const [systemLogs, setSystemLogs] = useState(['Started Arya']);
-  const [chatHistory, setChatHistory] = useState([]); // keep history of chat interactions
+  // const [chatHistory, setChatHistory] = useState([]); // keep history of chat interactions
+  const [agentsList, setAgentsList] = useState([]); // keep track of agents
+  const [sessions, setSessions] = useState([]);
+  const {
+    activeAgentId,
+    setActiveAgentId,
+    chatHistory,
+    addChatMessage,
+    ensureActiveSession,
+  } = useChatSessionContext();
 
   const modeStyles = {
     waiting: { label: 'Waiting for wakeword', accent: 'text-amber-400', border: 'border-amber-400/50', glow: 'shadow-[0_0_20px_-4px_rgba(251,191,36,0.35)]', bar: 'bg-amber-400' },
@@ -37,15 +49,48 @@ export default function useVoiceAssistant() {
     modeRef.current = mode;
   }, [mode]);
 
+  
+
   // helpers -----------------------------------------------------------------------------------
 
   const addLog = useCallback((message) => {
     setSystemLogs((prev) => [...prev, message]);
   }, []);
 
-  const addChatMessage = useCallback((message) => {
-    setChatHistory((prev) => [...prev, message]);
+  // const addChatMessage = useCallback((message) => {
+  //   setChatHistory((prev) => [...prev, message]);
+  // }, []);
+
+  const addAgent = useCallback((agent) => {
+    setAgentsList((prev) => [...prev, agent]);
   }, []);
+
+  const persistMessage = useCallback(async (sender, content) => {
+    try {
+      const sessionName = sender === 'user' ? content : undefined;
+      const { activeSessionId: sessionId, createdSession } = await ensureActiveSession(sessionName);
+      if (createdSession) {
+        setSessions((currentSessions) => currentSessions.some(
+          (session) => session.id === createdSession.id
+        ) ? currentSessions : [createdSession, ...currentSessions]);
+      }
+
+      addChatMessage({
+        sender,
+        text: content,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+
+      await sendMessage({
+        sessionId,
+        agentId: activeAgentId,
+        sender,
+        content,
+      });
+    } catch (error) {
+      console.error('Failed to save chat message:', error);
+    }
+  }, [activeAgentId, addChatMessage, ensureActiveSession]);
 
   // Forcefully stop playing audio AND unblock the speech Promise
   const stopAudio = () => {
@@ -91,19 +136,28 @@ export default function useVoiceAssistant() {
 
       setMode('searching');
       addLog(`Searching: "${sentence}"`);
-      const answer = await streamChatResponse(sentence);
+      const answer = await streamChatResponse(sentence, chatHistory);
 
       setMode('speaking');
       addLog('Speaking response');
+      // const audio = await puter.ai.txt2speech(answer, {
+      //   provider: 'openai',
+      //   model: 'gpt-4o-mini-tts',
+      //   voice: 'nova',
+      //   response_format: 'wav',
+      //   instructions: 'Keep the delivery clear and friendly.',
+      // });
+
       const audio = await puter.ai.txt2speech(answer, {
-        provider: 'openai',
-        model: 'gpt-4o-mini-tts',
-        voice: 'nova',
-        response_format: 'wav',
-        instructions: 'Keep the delivery clear and friendly.',
+        provider: "openai",
+        model: "gpt-4o-mini-tts",
+        voice: "nova",
+        response_format: "wav",
+        instructions: "Keep the delivery clear and friendly.",
       });
 
-      addChatMessage(`Arya: ${answer}`);
+
+      persistMessage('assistant', answer);
 
       // Turn mic on right before audio plays to capture barge-in wakewords
       SpeechRecognition.startListening({ continuous: true });
@@ -134,13 +188,13 @@ export default function useVoiceAssistant() {
       // Clean up resolver ref
       stopAudioResolverRef.current = null;
       resetTranscript();
-      
+
       // FIX 1: Check modeRef.current (will be "listening" if interrupted)
       if (modeRef.current === 'speaking') {
         setMode('waiting');
         addLog('Listening for wakeword...');
       }
-      
+
       SpeechRecognition.startListening({ continuous: true });
     }
   }
@@ -153,11 +207,11 @@ export default function useVoiceAssistant() {
     // BARGE-IN / INTERRUPTION CHECK
     if (mode === 'speaking' && text.includes(wakeword)) {
       addLog('⚡ Interrupted by user!');
-      
+
       // FIX 2: Manually sync modeRef FIRST so finally block reads 'listening'
       modeRef.current = 'listening';
       setMode('listening');
-      
+
       stopAudio(); // Halts audio & resolves Promise synchronously
       resetTranscript();
       return;
@@ -180,10 +234,10 @@ export default function useVoiceAssistant() {
         if (modeRef.current !== 'listening') return;
 
         const sentence = transcript.trim();
-        
+
         // FIX 3: Ignore empty transcripts immediately after an interruption reset
         if (sentence && sentence.toLowerCase() !== wakeword) {
-          addChatMessage(`User: ${sentence}`);
+          persistMessage('user', sentence);
           AryaSpeak(sentence);
         } else if (!sentence) {
           // Keep listening for a bit longer if user just interrupted without speaking a command yet
@@ -206,13 +260,52 @@ export default function useVoiceAssistant() {
     };
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    axios.get(BaseUrl + '/api/agents/status')
+      .then(({ data }) => {
+        const agents = data?.data?.rows;
+        if (isMounted) {
+          const availableAgents = Array.isArray(agents) ? agents : [];
+          setAgentsList(availableAgents);
+          setActiveAgentId((currentAgentId) => currentAgentId ?? availableAgents[0]?.id ?? null);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to load agents:', error);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [setActiveAgentId]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    fetchSessions()
+      .then((data) => {
+        if (isMounted) setSessions(Array.isArray(data?.sessions) ? data.sessions : []);
+      })
+      .catch((error) => {
+        console.error('Failed to load sessions:', error);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   return {
     transcript,
     listening,
     mode,
     modeStyles,
     systemLogs,
-    chatHistory,
+    agentsList,
+    // chatHistory,
+    sessions,
     browserSupportsSpeechRecognition,
     AryaTalk,
     AryaStop,

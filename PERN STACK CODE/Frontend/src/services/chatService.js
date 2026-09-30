@@ -1,12 +1,24 @@
-const BaseUrl = 'http://localhost:3000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
 
-export async function streamChatResponse(prompt){
-    const response = await fetch(`${BaseUrl}/api/chat/stream`, {
+export async function streamChatResponse(prompt, chatHistory = []){
+  const messages = [
+    { role: 'system', content: 'You are ARYA, an intelligent local AI assistant.' },
+    ...chatHistory
+      .filter((message) => ['user', 'assistant', 'system'].includes(message.sender))
+      .map((message) => ({
+        role: message.sender,
+        content: message.text ?? message.content,
+      }))
+      .filter((message) => typeof message.content === 'string' && message.content.trim()),
+    { role: 'user', content: prompt },
+  ];
+
+    const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             model: 'arya',
-            messages: [{ role: 'user', content: prompt }],
+      messages,
         }),
     });
 
@@ -39,3 +51,38 @@ export async function streamChatResponse(prompt){
 
     return answer;
 }
+
+// src/services/chatService.js
+
+
+export const fetchSessions = async () => {
+  const res = await fetch(`${API_BASE_URL}/api/chat/sessions`);
+  if (!res.ok) throw new Error('Failed to fetch sessions');
+  return res.json();
+};
+
+export const createSession = async (sessionName = 'New Chat Session') => {
+  const res = await fetch(`${API_BASE_URL}/api/chat/createsession`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionName }),
+  });
+  if (!res.ok) throw new Error('Failed to create session');
+  return res.json();
+};
+
+export const fetchSessionMessages = async (sessionId) => {
+  const res = await fetch(`${API_BASE_URL}/api/chat/sessions/${sessionId}/messages`);
+  if (!res.ok) throw new Error('Failed to fetch session messages');
+  return res.json();
+};
+
+export const sendMessage = async ({ sessionId, agentId, sender, content }) => {
+  const res = await fetch(`${API_BASE_URL}/api/chat/message`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, agentId, sender, content }),
+  });
+  if (!res.ok) throw new Error('Failed to send message');
+  return res.json();
+};

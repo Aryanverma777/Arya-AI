@@ -5,7 +5,7 @@ export default function ChatFeed({ chatHistory }) {
       <ul className="space-y-2 max-h-80 overflow-y-auto pr-1">
         {chatHistory.map((chat, index) => (
           <li key={index} className="text-[11px] text-slate-500 border-l border-violet-500/40 pl-2 py-0.5 leading-snug">
-            {chat}
+            {typeof chat === 'string' ? chat : `${chat.sender}: ${chat.text}`}
           </li>
         ))}
       </ul>
